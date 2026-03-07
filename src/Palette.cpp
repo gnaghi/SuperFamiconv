@@ -203,6 +203,44 @@ void Palette::add_images(std::vector<sfc::Image> palette_tiles) {
   }
 }
 
+// add optimized subpalettes using SGD
+void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
+                                   double fraction_of_pixels, uint32_t seed) {
+  // Get raw image data
+  channel_vec_t image_data;
+  for (unsigned y = 0; y < full_image.height(); y++) {
+    for (unsigned x = 0; x < full_image.width(); x++) {
+      rgba_t pixel = full_image.rgba_color_at(x + y * full_image.width());
+      image_data.push_back(pixel & 0xff);
+      image_data.push_back((pixel >> 8) & 0xff);
+      image_data.push_back((pixel >> 16) & 0xff);
+      image_data.push_back((pixel >> 24) & 0xff);
+    }
+  }
+
+  auto result = sgd_optimize(
+      image_data,
+      full_image.width(), full_image.height(),
+      tile_w, tile_h,
+      _max_subpalettes, _max_colors_per_subpalette,
+      _mode, fraction_of_pixels,
+      _col0_is_shared, _col0,
+      seed
+  );
+
+  for (auto& pal_colors : result.palettes) {
+    auto& sp = add_subpalette();
+    if (_col0_is_shared) {
+      // Ensure color 0 is at position 0
+      auto reduced_col0 = reduce_color(_col0, _mode);
+      auto p = std::find(pal_colors.begin(), pal_colors.end(), reduced_col0);
+      if (p != pal_colors.end())
+        std::iter_swap(p, pal_colors.begin());
+    }
+    sp.add(pal_colors);
+  }
+}
+
 void Palette::add_colors(const rgba_vec_t& colors, bool reduce_depth) {
   auto rc = colors;
   if (reduce_depth)

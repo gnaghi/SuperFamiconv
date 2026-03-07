@@ -41,6 +41,9 @@ struct Settings {
   int tile_base_offset;
   int palette_base_offset;
   bool sprite_mode;
+  bool optimize;
+  unsigned seed;
+  double fraction_of_pixels;
   std::string color_zero;
 };
 
@@ -86,6 +89,9 @@ int superfamiconv(int argc, char* argv[]) {
     options.Add(settings.tile_base_offset,    'T', "tile-base-offset",     "Tile base offset for map data",     int(0),              "Settings");
     options.Add(settings.palette_base_offset, 'P', "palette-base-offset",  "Palette base offset for map data",  int(0),              "Settings");
     options.AddSwitch(settings.sprite_mode,   'S', "sprite-mode",          "Apply sprite output settings",      false,               "Settings");
+    options.AddSwitch(settings.optimize,      'O', "optimize",             "Use SGD palette optimization",      false,               "Settings");
+    options.Add(settings.seed,               '\0', "seed",                 "Random seed for optimizer",         unsigned(0),         "Settings");
+    options.Add(settings.fraction_of_pixels, '\0', "fraction-of-pixels",   "Optimizer training intensity",      double(0.1),         "Settings");
     options.Add(settings.color_zero,          '\0', "color-zero",           "Set color #0", std::string(),                           "Settings");
 
     options.AddSwitch(verbose,                'v', "verbose",              "Verbose logging", false, "_");
@@ -195,7 +201,14 @@ int superfamiconv(int argc, char* argv[]) {
           palette.prime_col0(col0);
         }
 
-        palette.add_images(image.crops(settings.tile_w, settings.tile_h, settings.mode));
+        if (settings.optimize) {
+          if (verbose)
+            fmt::print("Using SGD palette optimization (seed={}, fop={:.2f})\n", settings.seed, settings.fraction_of_pixels);
+          palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
+                                       settings.fraction_of_pixels, settings.seed);
+        } else {
+          palette.add_images(image.crops(settings.tile_w, settings.tile_h, settings.mode));
+        }
         palette.sort();
       }
       if (verbose)

@@ -7,6 +7,7 @@
 #include "Common.h"
 #include "Image.h"
 #include "Mode.h"
+#include "Optimizer.h"
 
 namespace sfc {
 
@@ -56,6 +57,8 @@ struct Palette final {
   void check_col0_duplicates();
 
   void add_images(std::vector<sfc::Image>);
+  void add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
+                            double fraction_of_pixels = 0.1, uint32_t seed = 0);
   void add_colors(const rgba_vec_t& colors, bool reduce_depth = true);
 
   int index_of(const Subpalette& subpalette) const;

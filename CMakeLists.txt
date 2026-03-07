@@ -20,9 +20,17 @@ if(MSVC)
 endif()
 
 if(MSVC)
-  set(SOURCES include/fmt/format.cpp include/LodePNG/lodepng.cpp include/getopt-win/getopt.c src/superfamiconv.cpp src/sfc_palette.cpp src/sfc_tiles.cpp src/sfc_map.cpp src/Image.cpp src/Map.cpp src/Palette.cpp src/Tiles.cpp)
+  set(SOURCES include/fmt/format.cpp include/LodePNG/lodepng.cpp include/getopt-win/getopt.c src/superfamiconv.cpp src/sfc_palette.cpp src/sfc_tiles.cpp src/sfc_map.cpp src/Image.cpp src/Map.cpp src/Palette.cpp src/Tiles.cpp src/Optimizer.cpp)
 else()
-  set(SOURCES include/fmt/format.cpp include/LodePNG/lodepng.cpp src/superfamiconv.cpp src/sfc_palette.cpp src/sfc_tiles.cpp src/sfc_map.cpp src/Image.cpp src/Map.cpp src/Palette.cpp src/Tiles.cpp)
+  set(SOURCES include/fmt/format.cpp include/LodePNG/lodepng.cpp src/superfamiconv.cpp src/sfc_palette.cpp src/sfc_tiles.cpp src/sfc_map.cpp src/Image.cpp src/Map.cpp src/Palette.cpp src/Tiles.cpp src/Optimizer.cpp)
 endif()
 
 add_executable(superfamiconv ${SOURCES})
+
+# Optimizer uses large stack arrays - increase stack size
+# Static linking for standalone binary on MinGW
+if(MSVC)
+  target_link_options(superfamiconv PRIVATE /STACK:8388608)
+else()
+  target_link_options(superfamiconv PRIVATE -Wl,--stack,8388608 -static)
+endif()
