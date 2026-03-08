@@ -133,6 +133,13 @@ Image::Image(const sfc::Tileset& tileset, unsigned image_width) {
   _colors = rgba_set_t(rgba_v.begin(), rgba_v.end());
 }
 
+// Construct Image from raw RGBA channel data (8-bit per channel)
+Image::Image(unsigned width, unsigned height, const channel_vec_t& rgba_data)
+    : _width(width), _height(height), _data(rgba_data), _src_coord_x(0), _src_coord_y(0) {
+  auto rgba_v = this->rgba_data();
+  _colors = rgba_set_t(rgba_v.begin(), rgba_v.end());
+}
+
 // Make new normalized image with color indices mapped to palette
 Image::Image(const Image& image, const sfc::Subpalette& subpalette)
     : _width(image.width()), _height(image.height()), _palette(subpalette.normalized_colors()) {

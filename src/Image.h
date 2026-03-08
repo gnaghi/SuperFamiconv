@@ -23,6 +23,7 @@ struct Image final {
   Image(const sfc::Palette& palette);
   Image(const sfc::Tileset& tileset, unsigned width = 128);
   Image(const Image& image, const sfc::Subpalette& subpalette);
+  Image(unsigned width, unsigned height, const channel_vec_t& rgba_data);
 
   unsigned width() const { return _width; }
   unsigned height() const { return _height; }

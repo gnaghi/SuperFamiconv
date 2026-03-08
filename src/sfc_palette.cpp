@@ -26,6 +26,9 @@ struct Settings {
   bool optimize;
   unsigned seed;
   double fraction_of_pixels;
+  std::string dither;
+  double dither_weight;
+  std::string dither_pattern;
   std::string color_zero;
 };
 }; // namespace SfcPalette
@@ -61,6 +64,9 @@ int sfc_palette(int argc, char* argv[]) {
     options.AddSwitch(settings.optimize,     'O', "optimize",       "Use SGD palette optimization",     false,               "Settings");
     options.Add(settings.seed,              '\0', "seed",            "Random seed for optimizer",        unsigned(0),         "Settings");
     options.Add(settings.fraction_of_pixels,'\0', "fraction-of-pixels","Optimizer training intensity",  double(0.1),         "Settings");
+    options.Add(settings.dither,            '\0', "dither",          "Dithering mode (off/fast/slow)",   std::string("off"),  "Settings");
+    options.Add(settings.dither_weight,     '\0', "dither-weight",   "Dithering weight (0.01-1.0)",      double(0.5),         "Settings");
+    options.Add(settings.dither_pattern,    '\0', "dither-pattern",  "Dither pattern (diagonal4/horizontal4/vertical4/diagonal2/horizontal2/vertical2)", std::string("diagonal4"), "Settings");
     options.Add(settings.color_zero,         '0', "color-zero",     "Set color #0",                     std::string(),       "Settings");
 
     options.AddSwitch(verbose,               'v', "verbose",        "Verbose logging", false, "_");
@@ -144,10 +150,32 @@ int sfc_palette(int argc, char* argv[]) {
       }
 
       if (settings.optimize) {
+        // Parse dither options
+        sfc::DitherOptions dither_opts;
+        if (settings.dither == "fast") dither_opts.mode = sfc::DitherMode::fast;
+        else if (settings.dither == "slow") dither_opts.mode = sfc::DitherMode::slow;
+        dither_opts.weight = settings.dither_weight;
+        if (settings.dither_pattern == "horizontal4") dither_opts.pattern = sfc::DitherPattern::horizontal4;
+        else if (settings.dither_pattern == "vertical4") dither_opts.pattern = sfc::DitherPattern::vertical4;
+        else if (settings.dither_pattern == "diagonal2") dither_opts.pattern = sfc::DitherPattern::diagonal2;
+        else if (settings.dither_pattern == "horizontal2") dither_opts.pattern = sfc::DitherPattern::horizontal2;
+        else if (settings.dither_pattern == "vertical2") dither_opts.pattern = sfc::DitherPattern::vertical2;
+
         if (verbose)
-          fmt::print("Using SGD palette optimization (seed={}, fop={:.2f})\n", settings.seed, settings.fraction_of_pixels);
+          fmt::print("Using SGD palette optimization (seed={}, fop={:.2f}, dither={})\n",
+                     settings.seed, settings.fraction_of_pixels, settings.dither);
         palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
-                                     settings.fraction_of_pixels, settings.seed);
+                                     settings.fraction_of_pixels, settings.seed, dither_opts);
+
+        // Output quantized image when -o is specified in optimize mode
+        if (!settings.out_image.empty()) {
+          auto quantized = palette.quantize_image(image, settings.tile_w, settings.tile_h, dither_opts);
+          sfc::Image qimg(image.width(), image.height(), quantized);
+          qimg.save(settings.out_image);
+          if (verbose)
+            fmt::print("Saved quantized image to \"{}\"\n", settings.out_image);
+          settings.out_image.clear(); // Don't save palette swatch below
+        }
       } else {
         palette.add_images(image.crops(settings.tile_w, settings.tile_h, settings.mode));
       }

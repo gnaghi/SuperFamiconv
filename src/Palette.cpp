@@ -203,20 +203,27 @@ void Palette::add_images(std::vector<sfc::Image> palette_tiles) {
   }
 }
 
-// add optimized subpalettes using SGD
-void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
-                                   double fraction_of_pixels, uint32_t seed) {
-  // Get raw image data
-  channel_vec_t image_data;
-  for (unsigned y = 0; y < full_image.height(); y++) {
-    for (unsigned x = 0; x < full_image.width(); x++) {
-      rgba_t pixel = full_image.rgba_color_at(x + y * full_image.width());
-      image_data.push_back(pixel & 0xff);
-      image_data.push_back((pixel >> 8) & 0xff);
-      image_data.push_back((pixel >> 16) & 0xff);
-      image_data.push_back((pixel >> 24) & 0xff);
+// Extract raw RGBA channel data from an Image
+static channel_vec_t image_to_channels(const sfc::Image& img) {
+  channel_vec_t data;
+  data.reserve(img.width() * img.height() * 4);
+  for (unsigned y = 0; y < img.height(); y++) {
+    for (unsigned x = 0; x < img.width(); x++) {
+      rgba_t pixel = img.rgba_color_at(x + y * img.width());
+      data.push_back(pixel & 0xff);
+      data.push_back((pixel >> 8) & 0xff);
+      data.push_back((pixel >> 16) & 0xff);
+      data.push_back((pixel >> 24) & 0xff);
     }
   }
+  return data;
+}
+
+// add optimized subpalettes using SGD
+void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
+                                   double fraction_of_pixels, uint32_t seed,
+                                   const DitherOptions& dither) {
+  auto image_data = image_to_channels(full_image);
 
   auto result = sgd_optimize(
       image_data,
@@ -225,7 +232,7 @@ void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w
       _max_subpalettes, _max_colors_per_subpalette,
       _mode, fraction_of_pixels,
       _col0_is_shared, _col0,
-      seed
+      seed, dither
   );
 
   for (auto& pal_colors : result.palettes) {
@@ -239,6 +246,18 @@ void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w
     }
     sp.add(pal_colors);
   }
+}
+
+// Quantize image using the current palettes, with optional dithering
+channel_vec_t Palette::quantize_image(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
+                                      const DitherOptions& dither) const {
+  auto image_data = image_to_channels(full_image);
+  return sgd_quantize(
+      image_data,
+      full_image.width(), full_image.height(),
+      tile_w, tile_h,
+      colors(), _mode, dither
+  );
 }
 
 void Palette::add_colors(const rgba_vec_t& colors, bool reduce_depth) {

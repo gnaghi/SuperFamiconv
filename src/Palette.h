@@ -58,7 +58,10 @@ struct Palette final {
 
   void add_images(std::vector<sfc::Image>);
   void add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
-                            double fraction_of_pixels = 0.1, uint32_t seed = 0);
+                            double fraction_of_pixels = 0.1, uint32_t seed = 0,
+                            const DitherOptions& dither = {});
+  channel_vec_t quantize_image(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
+                               const DitherOptions& dither = {}) const;
   void add_colors(const rgba_vec_t& colors, bool reduce_depth = true);
 
   int index_of(const Subpalette& subpalette) const;

@@ -48,6 +48,26 @@ static inline double oc_brightness(OColor c) {
   return 0.299 * c.r * c.r + 0.587 * c.g * c.g + 0.114 * c.b * c.b;
 }
 
+// ── Linear/sRGB conversion (for dithering error diffusion) ───────────────────
+
+static inline void oc_to_linear(OColor& c) { c.r *= c.r; c.g *= c.g; c.b *= c.b; }
+static inline void oc_to_srgb(OColor& c) { c.r = sqrt(c.r); c.g = sqrt(c.g); c.b = sqrt(c.b); }
+
+// ── Dither patterns (2x2 ordered dither, from palettequant) ──────────────────
+
+static const int DITHER_PATTERNS[6][2][2] = {
+    {{0,2},{3,1}}, {{0,3},{1,2}}, {{0,1},{3,2}},  // 4-candidate
+    {{0,1},{1,0}}, {{0,1},{0,1}}, {{0,0},{1,1}}   // 2-candidate
+};
+
+static int dither_pattern_candidates(DitherPattern p) {
+  return (int)p < 3 ? 4 : 2;
+}
+
+static const int (*dither_pattern_matrix(DitherPattern p))[2] {
+  return DITHER_PATTERNS[(int)p];
+}
+
 static inline double js_round(double x) { return floor(x + 0.5); }
 
 static inline OColor oc_round(OColor c) {
@@ -176,6 +196,75 @@ static PRes closest_pal_dist(const OColor pals[][MAX_COLS], int np, int nc, cons
   return r;
 }
 
+// ── Dithered color/palette selection ──────────────────────────────────────────
+
+struct DRes { int idx; double dist; OColor target; };
+
+static DRes closest_color_dither(const OColor* pal, int nc, OColor pcol, int px, int py,
+    double dither_weight, const int dp[2][2], int dpx, double max_val) {
+  OColor error = {0, 0, 0};
+  OColor lp = pcol; oc_to_linear(lp);
+
+  struct Cand { int ci; double cd; double br; };
+  Cand cands[4];
+  OColor c = {};
+
+  for (int i = 0; i < dpx; i++) {
+    c = lp;
+    OColor err = error; oc_scl(err, dither_weight);
+    oc_add(c, err);
+    oc_clamp(c, 0, max_val * max_val); // linear space: max_val^2
+    oc_to_srgb(c);
+    CRes cr = closest_color(pal, nc, c);
+    cands[i] = {cr.idx, cr.dist, oc_brightness(pal[cr.idx])};
+    OColor red = oc_round(pal[cr.idx]);
+    oc_to_linear(red);
+    oc_add(error, lp);
+    oc_sub(error, red);
+  }
+
+  // Sort candidates by brightness
+  for (int i = 0; i < dpx - 1; i++)
+    for (int j = i + 1; j < dpx; j++)
+      if (cands[i].br > cands[j].br) std::swap(cands[i], cands[j]);
+
+  int idx = dp[px & 1][py & 1];
+  return {cands[idx].ci, cands[idx].cd, c};
+}
+
+static double pal_dist_d(const OColor* pal, int nc, const OTile& t,
+    double dw, const int dp[2][2], int dpx, double max_val) {
+  double tot = 0;
+  for (int i = 0; i < t.num_pixels; i++) {
+    DRes r = closest_color_dither(pal, nc, t.pcols[i], t.px[i], t.py[i], dw, dp, dpx, max_val);
+    tot += r.dist;
+  }
+  return tot;
+}
+
+static int closest_pal_idx_d(const OColor pals[][MAX_COLS], int np, int nc, const OTile& t,
+    double dw, const int dp[2][2], int dpx, double max_val) {
+  if (np == 1) return 0;
+  int best = 0;
+  double bd = pal_dist_d(pals[0], nc, t, dw, dp, dpx, max_val);
+  for (int i = 1; i < np; i++) {
+    double d = pal_dist_d(pals[i], nc, t, dw, dp, dpx, max_val);
+    if (d < bd) { best = i; bd = d; }
+  }
+  return best;
+}
+
+static PRes closest_pal_dist_d(const OColor pals[][MAX_COLS], int np, int nc, const OTile& t,
+    double dw, const int dp[2][2], int dpx, double max_val) {
+  PRes r;
+  r.idx = 0; r.dist = pal_dist_d(pals[0], nc, t, dw, dp, dpx, max_val);
+  for (int i = 1; i < np; i++) {
+    double d = pal_dist_d(pals[i], nc, t, dw, dp, dpx, max_val);
+    if (d < r.dist) { r.idx = i; r.dist = d; }
+  }
+  return r;
+}
+
 // ── MSE ───────────────────────────────────────────────────────────────────────
 
 static double mse(const OColor pals[][MAX_COLS], int np, int nc,
@@ -203,12 +292,23 @@ static void reduce_pals(OColor out[][MAX_COLS], const OColor in[][MAX_COLS], int
 
 static void move_closer(OColor pals[][MAX_COLS], int np, int nc,
                         const OPixel& pixel, const std::vector<OTile>& tiles, double alpha,
-                        int shared_color_idx) {
+                        int shared_color_idx,
+                        bool use_dither = false, double dw = 0, const int (*dp)[2] = nullptr,
+                        int dpx = 0, double max_val = 0) {
   const OTile& tile = tiles[pixel.tile_idx];
-  int pi = closest_pal_idx(pals, np, nc, tile);
-  CRes r = closest_color(pals[pi], nc, pixel.color);
-  if (r.idx != shared_color_idx)
-    oc_move(pals[pi][r.idx], pixel.color, alpha);
+  int pi, ci;
+  OColor target;
+  if (use_dither) {
+    pi = closest_pal_idx_d(pals, np, nc, tile, dw, dp, dpx, max_val);
+    DRes dr = closest_color_dither(pals[pi], nc, pixel.color, pixel.x, pixel.y, dw, dp, dpx, max_val);
+    ci = dr.idx; target = dr.target;
+  } else {
+    pi = closest_pal_idx(pals, np, nc, tile);
+    CRes r = closest_color(pals[pi], nc, pixel.color);
+    ci = r.idx; target = pixel.color;
+  }
+  if (ci != shared_color_idx)
+    oc_move(pals[pi][ci], target, alpha);
 }
 
 // ── Phase 1: Initialize palettes with 1 color ────────────────────────────────
@@ -216,12 +316,14 @@ static void move_closer(OColor pals[][MAX_COLS], int np, int nc,
 static int cq1(OColor pals[][MAX_COLS], int* out_nc,
                const std::vector<OTile>& tiles, const std::vector<OPixel>& pixels,
                RandShuf& rs, unsigned num_palettes, int shared_color_idx,
-               double fraction_of_pixels, OColor col0_val) {
+               double fraction_of_pixels, OColor col0_val,
+               bool slow_dither = false, double dw = 0, const int (*dp)[2] = nullptr,
+               int dpx = 0, double max_val = 0) {
   int npx = (int)pixels.size();
   double iterations = fraction_of_pixels * npx;
   double alpha = 0.3;
+  if (slow_dither) { iterations /= 5; alpha = 0.1; }
 
-  // Average color
   OColor avg = {0, 0, 0};
   for (const auto& p : pixels) oc_add(avg, p.color);
   oc_scl(avg, 1.0 / npx);
@@ -240,7 +342,8 @@ static int cq1(OColor pals[][MAX_COLS], int* out_nc,
     np = num_p;
     int it = iter_count(iterations);
     for (int i = 0; i < it; i++)
-      move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, alpha, shared_color_idx);
+      move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, alpha, shared_color_idx,
+                  slow_dither, dw, dp, dpx, max_val);
 
     double pd[MAX_PALS] = {};
     for (const auto& t : tiles) {
@@ -257,11 +360,14 @@ static int cq1(OColor pals[][MAX_COLS], int* out_nc,
 
 static void expand1(OColor pals[][MAX_COLS], int np, int* nc_p,
                     const std::vector<OTile>& tiles, const std::vector<OPixel>& pixels,
-                    RandShuf& rs, double fraction_of_pixels, int shared_color_idx) {
+                    RandShuf& rs, double fraction_of_pixels, int shared_color_idx,
+                    bool slow_dither = false, double dw = 0, const int (*dp)[2] = nullptr,
+                    int dpx = 0, double max_val = 0) {
   int nc = *nc_p;
   int npx = (int)pixels.size();
   double iterations = fraction_of_pixels * npx;
   double alpha = 0.3;
+  if (slow_dither) { iterations /= 5; alpha = 0.1; }
   int ncn = nc + 1;
   int si[MAX_PALS] = {};
 
@@ -285,14 +391,17 @@ static void expand1(OColor pals[][MAX_COLS], int np, int* nc_p,
 
   int it = iter_count(iterations);
   for (int i = 0; i < it; i++)
-    move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, alpha, shared_color_idx);
+    move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, alpha, shared_color_idx,
+                slow_dither, dw, dp, dpx, max_val);
 }
 
 // ── Phase 3: Replace weakest colors ───────────────────────────────────────────
 
 static void replace_weak(OColor out[][MAX_COLS], const OColor in[][MAX_COLS],
                         int np, int nc, const std::vector<OTile>& tiles,
-                        double mcf, double mpf, int rep_pal, int shared_color_idx) {
+                        double mcf, double mpf, int rep_pal, int shared_color_idx,
+                        bool slow_dither = false, double dw = 0,
+                        const int (*dp)[2] = nullptr, int dpx = 0, double max_val = 0) {
   int nt = (int)tiles.size();
   std::vector<int> cpi(nt, 0);
   double tpm[MAX_PALS] = {};
@@ -301,17 +410,20 @@ static void replace_weak(OColor out[][MAX_COLS], const OColor in[][MAX_COLS],
 
   if (np > 1) {
     for (int j = 0; j < nt; j++) {
-      PRes r = closest_pal_dist(in, np, nc, tiles[j]);
+      PRes r = slow_dither
+        ? closest_pal_dist_d(in, np, nc, tiles[j], dw, dp, dpx, max_val)
+        : closest_pal_dist(in, np, nc, tiles[j]);
       tpm[r.idx] += r.dist;
       cpi[j] = r.idx;
 
-      // Remaining palettes (exclude closest)
       OColor rem[MAX_PALS][MAX_COLS];
       int rn = 0;
       for (int p = 0; p < np; p++)
         if (p != r.idx) { memcpy(rem[rn], in[p], nc * sizeof(OColor)); rn++; }
       if (rn > 0) {
-        PRes r2 = closest_pal_dist(rem, rn, nc, tiles[j]);
+        PRes r2 = slow_dither
+          ? closest_pal_dist_d(rem, rn, nc, tiles[j], dw, dp, dpx, max_val)
+          : closest_pal_dist(rem, rn, nc, tiles[j]);
         rpm[r.idx] += r2.dist;
       }
     }
@@ -325,16 +437,29 @@ static void replace_weak(OColor out[][MAX_COLS], const OColor in[][MAX_COLS],
     for (int j = 0; j < nt; j++) {
       int mpi = cpi[j];
       const OColor* pal = in[mpi];
-      for (int i = 0; i < tiles[j].num_colors; i++) {
-        CRes r = closest_color(pal, nc, tiles[j].colors[i]);
-        tcm[mpi][r.idx] += r.dist * tiles[j].counts[i];
-        // Distance without this color
-        OColor rm[MAX_COLS];
-        int rn = 0;
-        for (int k = 0; k < nc; k++)
-          if (k != r.idx) rm[rn++] = pal[k];
-        CRes r2 = closest_color(rm, rn, tiles[j].colors[i]);
-        scm[mpi][r.idx] += r2.dist * tiles[j].counts[i];
+      if (slow_dither) {
+        // SLOW: evaluate each pixel individually with dithering
+        for (int p = 0; p < tiles[j].num_pixels; p++) {
+          DRes r = closest_color_dither(pal, nc, tiles[j].pcols[p],
+              tiles[j].px[p], tiles[j].py[p], dw, dp, dpx, max_val);
+          tcm[mpi][r.idx] += r.dist;
+          OColor rm[MAX_COLS]; int rn = 0;
+          for (int k = 0; k < nc; k++)
+            if (k != r.idx) rm[rn++] = pal[k];
+          DRes r2 = closest_color_dither(rm, rn, tiles[j].pcols[p],
+              tiles[j].px[p], tiles[j].py[p], dw, dp, dpx, max_val);
+          scm[mpi][r.idx] += r2.dist;
+        }
+      } else {
+        for (int i = 0; i < tiles[j].num_colors; i++) {
+          CRes r = closest_color(pal, nc, tiles[j].colors[i]);
+          tcm[mpi][r.idx] += r.dist * tiles[j].counts[i];
+          OColor rm[MAX_COLS]; int rn = 0;
+          for (int k = 0; k < nc; k++)
+            if (k != r.idx) rm[rn++] = pal[k];
+          CRes r2 = closest_color(rm, rn, tiles[j].colors[i]);
+          scm[mpi][r.idx] += r2.dist * tiles[j].counts[i];
+        }
       }
     }
 
@@ -608,10 +733,18 @@ OptimizedResult sgd_optimize(
     double fraction_of_pixels,
     bool col0_is_shared,
     rgba_t col0_value,
-    uint32_t seed)
+    uint32_t seed,
+    const DitherOptions& dither)
 {
   if (seed == 0) seed = (uint32_t)time(nullptr);
   Mulberry32 rng = {seed};
+
+  // Dither config
+  bool use_dither = dither.mode != DitherMode::off;
+  bool slow_dither = dither.mode == DitherMode::slow;
+  const int (*dp)[2] = nullptr;
+  int dpx = 0;
+  double dw = 0;
 
   // Reduce image colors to mode-specific color space
   std::vector<rgba_t> reduced(width * height);
@@ -645,22 +778,32 @@ OptimizedResult sgd_optimize(
   double alpha = 0.3;
   double final_alpha = 0.05;
 
+  unsigned max_val = max_channel_value_for_mode(mode);
+
+  if (use_dither) {
+    dp = dither_pattern_matrix(dither.pattern);
+    dpx = dither_pattern_candidates(dither.pattern);
+    dw = dither.weight;
+  }
+  if (slow_dither) final_alpha = 0.02;
+
   int shared_color_idx = col0_is_shared ? 0 : -1;
   OColor col0_oc = rgba_to_oc(col0_value);
-  unsigned max_val = max_channel_value_for_mode(mode);
 
   // Phase 1: Initialize palettes
   OColor pals[MAX_PALS][MAX_COLS];
   int np, nc;
   np = cq1(pals, &nc, tiles, pixels, rs, num_palettes, shared_color_idx,
-           fraction_of_pixels, col0_oc);
+           fraction_of_pixels, col0_oc,
+           slow_dither, dw, dp, dpx, (double)max_val);
 
   int si2 = 2, ei = colors_per_palette;
   if (col0_is_shared) si2++;
 
   // Phase 2: Expand palettes
   for (int num_c = si2; num_c <= ei; num_c++)
-    expand1(pals, np, &nc, tiles, pixels, rs, fraction_of_pixels, shared_color_idx);
+    expand1(pals, np, &nc, tiles, pixels, rs, fraction_of_pixels, shared_color_idx,
+            slow_dither, dw, dp, dpx, (double)max_val);
 
   // Phase 3: Replace weak colors (10 iterations)
   double min_mse_val = mse(pals, np, nc, tiles);
@@ -669,11 +812,13 @@ OptimizedResult sgd_optimize(
 
   for (int i = 0; i < 10; i++) {
     OColor tmp[MAX_PALS][MAX_COLS];
-    replace_weak(tmp, pals, np, nc, tiles, 0.5, 0.5, 1, shared_color_idx);
+    replace_weak(tmp, pals, np, nc, tiles, 0.5, 0.5, 1, shared_color_idx,
+                 slow_dither, dw, dp, dpx, (double)max_val);
     for (int p = 0; p < np; p++) memcpy(pals[p], tmp[p], nc * sizeof(OColor));
     int it = iter_count(iterations);
     for (int j = 0; j < it; j++)
-      move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, alpha, shared_color_idx);
+      move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, alpha, shared_color_idx,
+                  slow_dither, dw, dp, dpx, (double)max_val);
     double m = mse(pals, np, nc, tiles);
     if (m < min_mse_val) {
       min_mse_val = m;
@@ -682,24 +827,32 @@ OptimizedResult sgd_optimize(
   }
   for (int p = 0; p < np; p++) memcpy(pals[p], min_pals[p], nc * sizeof(OColor));
 
-  // Round to valid values
   OColor rp[MAX_PALS][MAX_COLS];
-  reduce_pals(rp, pals, np, nc);
-  for (int p = 0; p < np; p++) memcpy(pals[p], rp[p], nc * sizeof(OColor));
+
+  if (!use_dither) {
+    // Round to valid values before fine-tune (non-dithered only)
+    reduce_pals(rp, pals, np, nc);
+    for (int p = 0; p < np; p++) memcpy(pals[p], rp[p], nc * sizeof(OColor));
+  }
 
   // Phase 4: Fine-tune
   int fit = iter_count(iterations * 10);
   for (int i = 0; i < fit; i++)
-    move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, final_alpha, shared_color_idx);
+    move_closer(pals, np, nc, pixels[rs_next(rs)], tiles, final_alpha, shared_color_idx,
+                slow_dither, dw, dp, dpx, (double)max_val);
 
-  // Phase 5: K-means
-  reduce_pals(rp, pals, np, nc);
-  for (int p = 0; p < np; p++) memcpy(pals[p], rp[p], nc * sizeof(OColor));
-  for (int i = 0; i < 3; i++) {
-    OColor km[MAX_PALS][MAX_COLS];
-    kmeans(km, pals, np, nc, tiles, shared_color_idx);
-    for (int p = 0; p < np; p++) memcpy(pals[p], km[p], nc * sizeof(OColor));
+  if (!use_dither) {
+    // Phase 5: K-means (non-dithered only)
+    reduce_pals(rp, pals, np, nc);
+    for (int p = 0; p < np; p++) memcpy(pals[p], rp[p], nc * sizeof(OColor));
+    for (int i = 0; i < 3; i++) {
+      OColor km[MAX_PALS][MAX_COLS];
+      kmeans(km, pals, np, nc, tiles, shared_color_idx);
+      for (int p = 0; p < np; p++) memcpy(pals[p], km[p], nc * sizeof(OColor));
+    }
   }
+
+  // Final round to valid values
   reduce_pals(rp, pals, np, nc);
   for (int p = 0; p < np; p++) memcpy(pals[p], rp[p], nc * sizeof(OColor));
 
@@ -733,6 +886,130 @@ OptimizedResult sgd_optimize(
   }
 
   return result;
+}
+
+// ── Quantize image using palettes ─────────────────────────────────────────────
+
+channel_vec_t sgd_quantize(
+    const channel_vec_t& image_data,
+    unsigned width, unsigned height,
+    unsigned tile_width, unsigned tile_height,
+    const std::vector<rgba_vec_t>& palettes,
+    Mode mode,
+    const DitherOptions& dither)
+{
+  unsigned max_val = max_channel_value_for_mode(mode);
+
+  // Reduce image to mode-specific colors
+  std::vector<rgba_t> reduced(width * height);
+  for (unsigned i = 0; i < width * height; i++) {
+    rgba_t pixel = image_data[i * 4]
+                 | (image_data[i * 4 + 1] << 8)
+                 | (image_data[i * 4 + 2] << 16)
+                 | (image_data[i * 4 + 3] << 24);
+    reduced[i] = reduce_color(pixel, mode);
+  }
+
+  // Convert palettes to OColor format
+  int np = (int)palettes.size();
+  int nc = np > 0 ? (int)palettes[0].size() : 0;
+  OColor opals[MAX_PALS][MAX_COLS];
+  for (int p = 0; p < np; p++)
+    for (int c = 0; c < nc && c < (int)palettes[p].size(); c++)
+      opals[p][c] = rgba_to_oc(palettes[p][c]);
+
+  // Dither config
+  bool use_dither = dither.mode != DitherMode::off;
+  const int (*dp)[2] = nullptr;
+  int dpx = 0;
+  double dw = 0;
+  if (use_dither) {
+    dp = dither_pattern_matrix(dither.pattern);
+    dpx = dither_pattern_candidates(dither.pattern);
+    dw = dither.weight;
+  }
+
+  // Initialize output: transparent pixels stay transparent
+  channel_vec_t output(width * height * 4, 0);
+  for (unsigned i = 0; i < width * height; i++) {
+    if (reduced[i] == transparent_color) {
+      // Keep transparent (all zeros)
+    } else {
+      // Will be overwritten by quantized color below
+      rgba_t norm = normalize_color(reduced[i], mode);
+      output[i * 4]     = norm & 0xff;
+      output[i * 4 + 1] = (norm >> 8) & 0xff;
+      output[i * 4 + 2] = (norm >> 16) & 0xff;
+      output[i * 4 + 3] = (norm >> 24) & 0xff;
+    }
+  }
+
+  // For each tile region, find best palette and quantize pixels
+  for (unsigned sy = 0; sy < height; sy += tile_height) {
+    for (unsigned sx = 0; sx < width; sx += tile_width) {
+      unsigned ex = std::min(sx + tile_width, width);
+      unsigned ey = std::min(sy + tile_height, height);
+
+      // Build OTile for palette matching
+      OTile tile;
+      for (unsigned y = sy; y < ey; y++) {
+        for (unsigned x = sx; x < ex; x++) {
+          rgba_t pixel = reduced[x + width * y];
+          if (pixel == transparent_color) continue;
+          OColor c = rgba_to_oc(pixel);
+          tile.px.push_back(x);
+          tile.py.push_back(y);
+          tile.pcols.push_back(c);
+          tile.num_pixels++;
+          int found = -1;
+          for (int i = 0; i < tile.num_colors; i++)
+            if (oc_eq(tile.colors[i], c)) { found = i; break; }
+          if (found >= 0) tile.counts[found] += 1;
+          else { tile.colors.push_back(c); tile.counts.push_back(1); tile.num_colors++; }
+        }
+      }
+
+      if (tile.num_colors == 0) continue;
+
+      // Find best palette for this tile
+      int pi;
+      if (use_dither)
+        pi = closest_pal_idx_d(opals, np, nc, tile, dw, dp, dpx, (double)max_val);
+      else
+        pi = closest_pal_idx(opals, np, nc, tile);
+
+      // Quantize each pixel
+      for (int p = 0; p < tile.num_pixels; p++) {
+        unsigned px = tile.px[p];
+        unsigned py = tile.py[p];
+        OColor pcol = tile.pcols[p];
+
+        OColor qcol;
+        if (use_dither) {
+          DRes dr = closest_color_dither(opals[pi], nc, pcol, px, py, dw, dp, dpx, (double)max_val);
+          qcol = opals[pi][dr.idx];
+        } else {
+          CRes cr = closest_color(opals[pi], nc, pcol);
+          qcol = opals[pi][cr.idx];
+        }
+
+        // Round and clamp
+        qcol = oc_round(qcol);
+        oc_clamp(qcol, 0, max_val);
+
+        // Convert to normalized 8-bit RGBA
+        rgba_t qrgba = oc_to_rgba(qcol);
+        rgba_t norm = normalize_color(qrgba, mode);
+        unsigned idx = px + width * py;
+        output[idx * 4]     = norm & 0xff;
+        output[idx * 4 + 1] = (norm >> 8) & 0xff;
+        output[idx * 4 + 2] = (norm >> 16) & 0xff;
+        output[idx * 4 + 3] = (norm >> 24) & 0xff;
+      }
+    }
+  }
+
+  return output;
 }
 
 } /* namespace sfc */
