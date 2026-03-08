@@ -222,7 +222,8 @@ static channel_vec_t image_to_channels(const sfc::Image& img) {
 // add optimized subpalettes using SGD
 void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
                                    double fraction_of_pixels, uint32_t seed,
-                                   const DitherOptions& dither) {
+                                   const DitherOptions& dither,
+                                   const std::vector<rgba_vec_t>* initial_palettes) {
   auto image_data = image_to_channels(full_image);
 
   auto result = sgd_optimize(
@@ -232,7 +233,7 @@ void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w
       _max_subpalettes, _max_colors_per_subpalette,
       _mode, fraction_of_pixels,
       _col0_is_shared, _col0,
-      seed, dither
+      seed, dither, initial_palettes
   );
 
   for (auto& pal_colors : result.palettes) {
@@ -258,6 +259,33 @@ channel_vec_t Palette::quantize_image(const sfc::Image& full_image, unsigned til
       tile_w, tile_h,
       colors(), _mode, dither
   );
+}
+
+// add optimized subpalettes using tile-level k-means clustering
+void Palette::add_images_clustered(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
+                                   uint32_t seed) {
+  auto image_data = image_to_channels(full_image);
+
+  auto result = cluster_optimize(
+      image_data,
+      full_image.width(), full_image.height(),
+      tile_w, tile_h,
+      _max_subpalettes, _max_colors_per_subpalette,
+      _mode, 50,
+      _col0_is_shared, _col0,
+      seed
+  );
+
+  for (auto& pal_colors : result.palettes) {
+    auto& sp = add_subpalette();
+    if (_col0_is_shared) {
+      auto reduced_col0 = reduce_color(_col0, _mode);
+      auto p = std::find(pal_colors.begin(), pal_colors.end(), reduced_col0);
+      if (p != pal_colors.end())
+        std::iter_swap(p, pal_colors.begin());
+    }
+    sp.add(pal_colors);
+  }
 }
 
 void Palette::add_colors(const rgba_vec_t& colors, bool reduce_depth) {

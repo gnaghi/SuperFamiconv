@@ -1,9 +1,10 @@
-// SGD-based palette optimizer
+// Palette optimizer
 // Ported from palettequant (C implementation)
 //
-// Provides an alternative to the greedy set-covering palette builder:
-// uses stochastic gradient descent + k-means refinement to minimize
-// color error across all tiles.
+// Provides alternatives to the greedy set-covering palette builder:
+// - SGD: stochastic gradient descent + k-means refinement
+// - Cluster: tile-level k-means clustering
+// Both minimize color error across all tiles.
 
 #pragma once
 
@@ -41,6 +42,8 @@ struct OptimizedResult {
 
 // Run SGD palette optimization on image data.
 // Returns palettes in mode-specific reduced color space.
+// If initial_palettes is provided, skips Phase 1-2 (initialization/expansion)
+// and starts refinement from the given palettes.
 OptimizedResult sgd_optimize(
     const channel_vec_t& image_data,
     unsigned width, unsigned height,
@@ -52,7 +55,24 @@ OptimizedResult sgd_optimize(
     bool col0_is_shared = false,
     rgba_t col0_value = 0,
     uint32_t seed = 0,
-    const DitherOptions& dither = {}
+    const DitherOptions& dither = {},
+    const std::vector<rgba_vec_t>* initial_palettes = nullptr
+);
+
+// Run tile-clustering palette optimization.
+// Groups tiles by color similarity using k-means, then builds
+// one palette per cluster via inner k-means on cluster colors.
+OptimizedResult cluster_optimize(
+    const channel_vec_t& image_data,
+    unsigned width, unsigned height,
+    unsigned tile_width, unsigned tile_height,
+    unsigned num_palettes,
+    unsigned colors_per_palette,
+    Mode mode,
+    unsigned max_iterations = 50,
+    bool col0_is_shared = false,
+    rgba_t col0_value = 0,
+    uint32_t seed = 0
 );
 
 // Quantize an image using the given palettes, with optional dithering.

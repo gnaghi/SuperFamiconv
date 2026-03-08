@@ -734,7 +734,8 @@ OptimizedResult sgd_optimize(
     bool col0_is_shared,
     rgba_t col0_value,
     uint32_t seed,
-    const DitherOptions& dither)
+    const DitherOptions& dither,
+    const std::vector<rgba_vec_t>* initial_palettes)
 {
   if (seed == 0) seed = (uint32_t)time(nullptr);
   Mulberry32 rng = {seed};
@@ -790,20 +791,30 @@ OptimizedResult sgd_optimize(
   int shared_color_idx = col0_is_shared ? 0 : -1;
   OColor col0_oc = rgba_to_oc(col0_value);
 
-  // Phase 1: Initialize palettes
   OColor pals[MAX_PALS][MAX_COLS];
   int np, nc;
-  np = cq1(pals, &nc, tiles, pixels, rs, num_palettes, shared_color_idx,
-           fraction_of_pixels, col0_oc,
-           slow_dither, dw, dp, dpx, (double)max_val);
 
-  int si2 = 2, ei = colors_per_palette;
-  if (col0_is_shared) si2++;
+  if (initial_palettes && !initial_palettes->empty()) {
+    // Use provided initial palettes (skip Phase 1-2)
+    np = (int)initial_palettes->size();
+    nc = np > 0 ? (int)(*initial_palettes)[0].size() : 0;
+    for (int p = 0; p < np; p++)
+      for (int c = 0; c < nc && c < (int)(*initial_palettes)[p].size(); c++)
+        pals[p][c] = rgba_to_oc((*initial_palettes)[p][c]);
+  } else {
+    // Phase 1: Initialize palettes
+    np = cq1(pals, &nc, tiles, pixels, rs, num_palettes, shared_color_idx,
+             fraction_of_pixels, col0_oc,
+             slow_dither, dw, dp, dpx, (double)max_val);
 
-  // Phase 2: Expand palettes
-  for (int num_c = si2; num_c <= ei; num_c++)
-    expand1(pals, np, &nc, tiles, pixels, rs, fraction_of_pixels, shared_color_idx,
-            slow_dither, dw, dp, dpx, (double)max_val);
+    int si2 = 2, ei = colors_per_palette;
+    if (col0_is_shared) si2++;
+
+    // Phase 2: Expand palettes
+    for (int num_c = si2; num_c <= ei; num_c++)
+      expand1(pals, np, &nc, tiles, pixels, rs, fraction_of_pixels, shared_color_idx,
+              slow_dither, dw, dp, dpx, (double)max_val);
+  }
 
   // Phase 3: Replace weak colors (10 iterations)
   double min_mse_val = mse(pals, np, nc, tiles);
@@ -1010,6 +1021,220 @@ channel_vec_t sgd_quantize(
   }
 
   return output;
+}
+
+// ── Tile-clustering palette optimization ──────────────────────────────────────
+
+OptimizedResult cluster_optimize(
+    const channel_vec_t& image_data,
+    unsigned width, unsigned height,
+    unsigned tile_width, unsigned tile_height,
+    unsigned num_palettes,
+    unsigned colors_per_palette,
+    Mode mode,
+    unsigned max_iterations,
+    bool col0_is_shared,
+    rgba_t col0_value,
+    uint32_t seed)
+{
+  if (seed == 0) seed = (uint32_t)time(nullptr);
+  Mulberry32 rng = {seed};
+
+  // Reduce image colors to mode-specific color space
+  std::vector<rgba_t> reduced(width * height);
+  for (unsigned i = 0; i < width * height; i++) {
+    rgba_t pixel = image_data[i * 4]
+                 | (image_data[i * 4 + 1] << 8)
+                 | (image_data[i * 4 + 2] << 16)
+                 | (image_data[i * 4 + 3] << 24);
+    reduced[i] = reduce_color(pixel, mode);
+  }
+
+  // Extract tiles
+  std::vector<OTile> tiles;
+  extract_tiles(tiles, reduced, width, height, tile_width, tile_height);
+  if (tiles.empty()) return {{}, {}};
+
+  int nt = (int)tiles.size();
+  int np = std::min((int)num_palettes, nt);
+  int nc = (int)colors_per_palette;
+  unsigned max_val = max_channel_value_for_mode(mode);
+  int shared_color_idx = col0_is_shared ? 0 : -1;
+  OColor col0_oc = rgba_to_oc(col0_value);
+
+  // Compute tile centroids (weighted average color)
+  std::vector<OColor> centroids(nt);
+  for (int t = 0; t < nt; t++) {
+    OColor sum = {0, 0, 0};
+    double total = 0;
+    for (int i = 0; i < tiles[t].num_colors; i++) {
+      OColor w = tiles[t].colors[i];
+      oc_scl(w, tiles[t].counts[i]);
+      oc_add(sum, w);
+      total += tiles[t].counts[i];
+    }
+    if (total > 0) oc_scl(sum, 1.0 / total);
+    centroids[t] = sum;
+  }
+
+  // K-means++ initialization on tile centroids
+  std::vector<int> centers(np);
+  centers[0] = (int)(m32_next(rng) * nt);
+  std::vector<double> kpp_dists(nt, 1e30);
+  for (int k = 1; k < np; k++) {
+    for (int t = 0; t < nt; t++) {
+      double d = oc_dist(centroids[t], centroids[centers[k - 1]]);
+      if (d < kpp_dists[t]) kpp_dists[t] = d;
+    }
+    double total = 0;
+    for (int t = 0; t < nt; t++) total += kpp_dists[t];
+    double r = m32_next(rng) * total;
+    double cum = 0;
+    int sel = nt - 1;
+    for (int t = 0; t < nt; t++) {
+      cum += kpp_dists[t];
+      if (cum >= r) { sel = t; break; }
+    }
+    centers[k] = sel;
+  }
+
+  // Initial tile-to-cluster assignment (by centroid distance)
+  std::vector<int> assignment(nt, 0);
+  for (int t = 0; t < nt; t++) {
+    double best = 1e30;
+    for (int k = 0; k < np; k++) {
+      double d = oc_dist(centroids[t], centroids[centers[k]]);
+      if (d < best) { best = d; assignment[t] = k; }
+    }
+  }
+
+  // Initialize palettes from cluster color data
+  OColor pals[MAX_PALS][MAX_COLS];
+  for (int p = 0; p < np; p++) {
+    // Collect all unique colors from tiles assigned to this cluster
+    std::vector<OColor> ccolors;
+    std::vector<double> ccounts;
+    for (int t = 0; t < nt; t++) {
+      if (assignment[t] != p) continue;
+      for (int i = 0; i < tiles[t].num_colors; i++) {
+        OColor c = tiles[t].colors[i];
+        int found = -1;
+        for (int j = 0; j < (int)ccolors.size(); j++)
+          if (oc_eq(ccolors[j], c)) { found = j; break; }
+        if (found >= 0) ccounts[found] += tiles[t].counts[i];
+        else { ccolors.push_back(c); ccounts.push_back(tiles[t].counts[i]); }
+      }
+    }
+
+    int ncc = (int)ccolors.size();
+    int start = col0_is_shared ? 1 : 0;
+    if (col0_is_shared) pals[p][0] = col0_oc;
+    int slots = nc - start;
+
+    if (ncc == 0) {
+      // Empty cluster: fill with centroid
+      for (int c = 0; c < slots; c++)
+        pals[p][start + c] = centroids[centers[p]];
+    } else if (ncc <= slots) {
+      // Fewer colors than slots: use all, replicate last
+      for (int c = 0; c < ncc; c++) pals[p][start + c] = ccolors[c];
+      for (int c = ncc; c < slots; c++) pals[p][start + c] = ccolors[ncc - 1];
+    } else {
+      // K-means++ on cluster colors to pick diverse initial palette colors
+      std::vector<double> cdists(ncc, 1e30);
+      int pick = (int)(m32_next(rng) * ncc);
+      pals[p][start] = ccolors[pick];
+      for (int ci = 1; ci < slots; ci++) {
+        for (int j = 0; j < ncc; j++) {
+          double d = oc_dist(ccolors[j], pals[p][start + ci - 1]);
+          if (d < cdists[j]) cdists[j] = d;
+        }
+        double total = 0;
+        for (int j = 0; j < ncc; j++) total += cdists[j] * ccounts[j];
+        double r = m32_next(rng) * total;
+        double cum = 0;
+        int sel = ncc - 1;
+        for (int j = 0; j < ncc; j++) {
+          cum += cdists[j] * ccounts[j];
+          if (cum >= r) { sel = j; break; }
+        }
+        pals[p][start + ci] = ccolors[sel];
+      }
+    }
+  }
+
+  // Main iteration loop: assign tiles → inner k-means → repeat
+  for (unsigned iter = 0; iter < max_iterations; iter++) {
+    bool changed = false;
+
+    // Assign tiles to closest palette
+    for (int t = 0; t < nt; t++) {
+      int pi = closest_pal_idx(pals, np, nc, tiles[t]);
+      if (pi != assignment[t]) { assignment[t] = pi; changed = true; }
+    }
+
+    if (!changed && iter > 0) break; // Converged
+
+    // Inner k-means: rebuild palette colors from assigned tiles
+    int kcounts[MAX_PALS][MAX_COLS] = {};
+    OColor ksums[MAX_PALS][MAX_COLS];
+    for (int p = 0; p < np; p++)
+      for (int c = 0; c < nc; c++)
+        ksums[p][c] = {0, 0, 0};
+
+    for (int t = 0; t < nt; t++) {
+      int p = assignment[t];
+      for (int i = 0; i < tiles[t].num_colors; i++) {
+        CRes r = closest_color(pals[p], nc, tiles[t].colors[i]);
+        kcounts[p][r.idx] += (int)tiles[t].counts[i];
+        OColor w = tiles[t].colors[i];
+        oc_scl(w, tiles[t].counts[i]);
+        oc_add(ksums[p][r.idx], w);
+      }
+    }
+
+    for (int p = 0; p < np; p++)
+      for (int c = 0; c < nc; c++) {
+        if (c == shared_color_idx || kcounts[p][c] == 0)
+          continue; // Keep current value
+        pals[p][c] = ksums[p][c];
+        oc_scl(pals[p][c], 1.0 / kcounts[p][c]);
+      }
+  }
+
+  // Round to valid values
+  OColor rp[MAX_PALS][MAX_COLS];
+  reduce_pals(rp, pals, np, nc);
+  for (int p = 0; p < np; p++) memcpy(pals[p], rp[p], nc * sizeof(OColor));
+
+  // Clamp to valid range
+  for (int p = 0; p < np; p++)
+    for (int c = 0; c < nc; c++)
+      oc_clamp(pals[p][c], 0, max_val);
+
+  // Sort for display
+  OColor sinp[MAX_PALS][MAX_COLS];
+  for (int p = 0; p < np; p++) memcpy(sinp[p], pals[p], nc * sizeof(OColor));
+  int ss = col0_is_shared ? 1 : 0;
+  OColor disp_pals[MAX_PALS][MAX_COLS];
+  sort_palettes(disp_pals, sinp, np, nc, ss, rng);
+
+  // Build result
+  OptimizedResult result;
+  for (int p = 0; p < np; p++) {
+    rgba_vec_t pal_colors;
+    for (int c = 0; c < nc; c++)
+      pal_colors.push_back(oc_to_rgba(pals[p][c]));
+    result.palettes.push_back(pal_colors);
+  }
+  for (int p = 0; p < np; p++) {
+    rgba_vec_t pal_colors;
+    for (int c = 0; c < nc; c++)
+      pal_colors.push_back(oc_to_rgba(disp_pals[p][c]));
+    result.display_palettes.push_back(pal_colors);
+  }
+
+  return result;
 }
 
 } /* namespace sfc */

@@ -24,6 +24,7 @@ struct Settings {
   bool no_remap;
   bool sprite_mode;
   bool optimize;
+  bool cluster;
   unsigned seed;
   double fraction_of_pixels;
   std::string dither;
@@ -62,6 +63,7 @@ int sfc_palette(int argc, char* argv[]) {
     options.AddSwitch(settings.no_remap,     'R', "no-remap",       "Don't remap colors",               false,               "Settings");
     options.AddSwitch(settings.sprite_mode,  'S', "sprite-mode",    "Apply sprite output settings",     false,               "Settings");
     options.AddSwitch(settings.optimize,     'O', "optimize",       "Use SGD palette optimization",     false,               "Settings");
+    options.AddSwitch(settings.cluster,     'K', "cluster",        "Use tile-clustering optimization", false,               "Settings");
     options.Add(settings.seed,              '\0', "seed",            "Random seed for optimizer",        unsigned(0),         "Settings");
     options.Add(settings.fraction_of_pixels,'\0', "fraction-of-pixels","Optimizer training intensity",  double(0.1),         "Settings");
     options.Add(settings.dither,            '\0', "dither",          "Dithering mode (off/fast/slow)",   std::string("off"),  "Settings");
@@ -149,7 +151,7 @@ int sfc_palette(int argc, char* argv[]) {
         palette.prime_col0(col0);
       }
 
-      if (settings.optimize) {
+      if (settings.optimize || settings.cluster) {
         // Parse dither options
         sfc::DitherOptions dither_opts;
         if (settings.dither == "fast") dither_opts.mode = sfc::DitherMode::fast;
@@ -161,13 +163,32 @@ int sfc_palette(int argc, char* argv[]) {
         else if (settings.dither_pattern == "horizontal2") dither_opts.pattern = sfc::DitherPattern::horizontal2;
         else if (settings.dither_pattern == "vertical2") dither_opts.pattern = sfc::DitherPattern::vertical2;
 
-        if (verbose)
-          fmt::print("Using SGD palette optimization (seed={}, fop={:.2f}, dither={})\n",
-                     settings.seed, settings.fraction_of_pixels, settings.dither);
-        palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
-                                     settings.fraction_of_pixels, settings.seed, dither_opts);
+        if (settings.cluster && settings.optimize) {
+          // Cluster + SGD: cluster initialization, then SGD refinement
+          if (verbose)
+            fmt::print("Using cluster+SGD optimization (seed={}, fop={:.2f}, dither={})\n",
+                       settings.seed, settings.fraction_of_pixels, settings.dither);
+          palette.add_images_clustered(image, settings.tile_w, settings.tile_h, settings.seed);
+          auto init_pals = palette.colors();
+          palette = sfc::Palette(settings.mode, settings.palettes, settings.colors);
+          if (settings.sprite_mode) palette.prime_col0(sfc::transparent_color);
+          else if (col0_forced || sfc::col0_is_shared_for_mode(settings.mode)) palette.prime_col0(col0);
+          palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
+                                       settings.fraction_of_pixels, settings.seed, dither_opts, &init_pals);
+        } else if (settings.optimize) {
+          if (verbose)
+            fmt::print("Using SGD palette optimization (seed={}, fop={:.2f}, dither={})\n",
+                       settings.seed, settings.fraction_of_pixels, settings.dither);
+          palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
+                                       settings.fraction_of_pixels, settings.seed, dither_opts);
+        } else {
+          // Cluster only
+          if (verbose)
+            fmt::print("Using tile-clustering optimization (seed={})\n", settings.seed);
+          palette.add_images_clustered(image, settings.tile_w, settings.tile_h, settings.seed);
+        }
 
-        // Output quantized image when -o is specified in optimize mode
+        // Output quantized image when -o is specified
         if (!settings.out_image.empty()) {
           auto quantized = palette.quantize_image(image, settings.tile_w, settings.tile_h, dither_opts);
           sfc::Image qimg(image.width(), image.height(), quantized);
