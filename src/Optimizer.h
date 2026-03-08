@@ -3,8 +3,9 @@
 //
 // Provides alternatives to the greedy set-covering palette builder:
 // - SGD: stochastic gradient descent + k-means refinement
-// - Cluster: tile-level k-means clustering
+// - Cluster: tile-level k-means clustering (flat or hierarchical)
 // Both minimize color error across all tiles.
+// Distance can be weighted RGB or CIE Lab Delta-E².
 
 #pragma once
 
@@ -56,12 +57,15 @@ OptimizedResult sgd_optimize(
     rgba_t col0_value = 0,
     uint32_t seed = 0,
     const DitherOptions& dither = {},
-    const std::vector<rgba_vec_t>* initial_palettes = nullptr
+    const std::vector<rgba_vec_t>* initial_palettes = nullptr,
+    bool use_lab = false
 );
 
 // Run tile-clustering palette optimization.
 // Groups tiles by color similarity using k-means, then builds
 // one palette per cluster via inner k-means on cluster colors.
+// When use_greedy is true, palettes are built via greedy selection (real colors).
+// When hierarchical is true, uses divisive hierarchical splitting instead of flat k-means.
 OptimizedResult cluster_optimize(
     const channel_vec_t& image_data,
     unsigned width, unsigned height,
@@ -72,7 +76,10 @@ OptimizedResult cluster_optimize(
     unsigned max_iterations = 50,
     bool col0_is_shared = false,
     rgba_t col0_value = 0,
-    uint32_t seed = 0
+    uint32_t seed = 0,
+    bool use_lab = false,
+    bool use_greedy = false,
+    bool hierarchical = false
 );
 
 // Quantize an image using the given palettes, with optional dithering.
@@ -84,7 +91,8 @@ channel_vec_t sgd_quantize(
     unsigned tile_width, unsigned tile_height,
     const std::vector<rgba_vec_t>& palettes,
     Mode mode,
-    const DitherOptions& dither = {}
+    const DitherOptions& dither = {},
+    bool use_lab = false
 );
 
 // Get the maximum channel value for a given mode (e.g., 31 for 5-bit SNES)
@@ -92,21 +100,24 @@ unsigned max_channel_value_for_mode(Mode mode);
 
 // Quality assessment report
 struct QualityReport {
-  double mse;              // Mean squared error (weighted: 2*dR^2+4*dG^2+dB^2)
+  double mse;              // Mean squared error (weighted RGB or Lab Delta-E²)
   double psnr;             // Peak signal-to-noise ratio (dB)
   double exact_match_pct;  // Percentage of pixels with exact color match
-  double max_error;        // Worst single-pixel weighted error
+  double max_error;        // Worst single-pixel error
+  double pct_de_lt5;       // Percentage of pixels with Delta-E < 5 (Lab mode)
   unsigned total_pixels;   // Total non-transparent pixels evaluated
 };
 
 // Compute quality metrics comparing original vs quantized image.
 // Both inputs are raw RGBA channel vectors (8-bit per channel).
 // Comparison is done in reduced color space for the given mode.
+// When use_lab is true, uses CIE Lab Delta-E² instead of weighted RGB.
 QualityReport compute_quality(
     const channel_vec_t& image_data,
     const channel_vec_t& quantized_data,
     unsigned width, unsigned height,
-    Mode mode
+    Mode mode,
+    bool use_lab = false
 );
 
 } /* namespace sfc */

@@ -51,6 +51,9 @@ struct Settings {
   std::string color_zero;
   bool quality;
   std::string out_preview;
+  bool lab;
+  bool greedy;
+  bool hierarchical;
 };
 
 int superfamiconv(int argc, char* argv[]) {
@@ -105,6 +108,9 @@ int superfamiconv(int argc, char* argv[]) {
     options.Add(settings.color_zero,          '\0', "color-zero",           "Set color #0", std::string(),                           "Settings");
     options.AddSwitch(settings.quality,       'Q', "quality",              "Print quality assessment",         false,               "Settings");
     options.Add(settings.out_preview,        '\0', "out-preview",          "Output: composite preview image",  std::string(),       "Settings");
+    options.AddSwitch(settings.lab,          '\0', "lab",                  "Use CIE Lab Delta-E distance",    false,               "Settings");
+    options.AddSwitch(settings.greedy,       '\0', "greedy",               "Greedy palette selection",         false,               "Settings");
+    options.AddSwitch(settings.hierarchical, '\0', "hierarchical",         "Hierarchical divisive clustering", false,               "Settings");
 
     options.AddSwitch(verbose,                'v', "verbose",              "Verbose logging", false, "_");
     options.AddSwitch(license,                'l', "license",              "Show licenses",   false, "_");
@@ -232,29 +238,36 @@ int superfamiconv(int argc, char* argv[]) {
         if (settings.optimize || settings.cluster) {
           if (settings.cluster && settings.optimize) {
             if (verbose)
-              fmt::print("Using cluster+SGD optimization (seed={}, fop={:.2f}, dither={})\n",
-                         settings.seed, settings.fraction_of_pixels, settings.dither);
-            palette.add_images_clustered(image, settings.tile_w, settings.tile_h, settings.seed);
+              fmt::print("Using cluster+SGD optimization (seed={}, fop={:.2f}, dither={}, lab={}, greedy={}, hier={})\n",
+                         settings.seed, settings.fraction_of_pixels, settings.dither,
+                         settings.lab, settings.greedy, settings.hierarchical);
+            palette.add_images_clustered(image, settings.tile_w, settings.tile_h, settings.seed,
+                                         settings.lab, settings.greedy, settings.hierarchical);
             auto init_pals = palette.colors();
             palette = sfc::Palette(settings.mode, palette_count, colors_per_palette);
             if (settings.sprite_mode) palette.prime_col0(sfc::transparent_color);
             else if (col0_forced || sfc::col0_is_shared_for_mode(settings.mode)) palette.prime_col0(col0);
             palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
-                                         settings.fraction_of_pixels, settings.seed, dither_opts, &init_pals);
+                                         settings.fraction_of_pixels, settings.seed, dither_opts, &init_pals,
+                                         settings.lab);
           } else if (settings.optimize) {
             if (verbose)
-              fmt::print("Using SGD palette optimization (seed={}, fop={:.2f}, dither={})\n",
-                         settings.seed, settings.fraction_of_pixels, settings.dither);
+              fmt::print("Using SGD palette optimization (seed={}, fop={:.2f}, dither={}, lab={})\n",
+                         settings.seed, settings.fraction_of_pixels, settings.dither, settings.lab);
             palette.add_images_optimized(image, settings.tile_w, settings.tile_h,
-                                         settings.fraction_of_pixels, settings.seed, dither_opts);
+                                         settings.fraction_of_pixels, settings.seed, dither_opts, nullptr,
+                                         settings.lab);
           } else {
             if (verbose)
-              fmt::print("Using tile-clustering optimization (seed={})\n", settings.seed);
-            palette.add_images_clustered(image, settings.tile_w, settings.tile_h, settings.seed);
+              fmt::print("Using tile-clustering optimization (seed={}, lab={}, greedy={}, hier={})\n",
+                         settings.seed, settings.lab, settings.greedy, settings.hierarchical);
+            palette.add_images_clustered(image, settings.tile_w, settings.tile_h, settings.seed,
+                                         settings.lab, settings.greedy, settings.hierarchical);
           }
 
           // Quantize image so tile/map pipeline can find exact color matches
-          auto quantized = palette.quantize_image(image, settings.tile_w, settings.tile_h, dither_opts);
+          auto quantized = palette.quantize_image(image, settings.tile_w, settings.tile_h, dither_opts,
+                                                   settings.lab);
           image = sfc::Image(image.width(), image.height(), quantized);
         } else {
           palette.add_images(image.crops(settings.tile_w, settings.tile_h, settings.mode));
@@ -267,18 +280,21 @@ int superfamiconv(int argc, char* argv[]) {
           if (settings.optimize || settings.cluster) quality_dither = dither_opts;
           channel_vec_t quantized;
           if (settings.optimize || settings.cluster) {
-            // image is already quantized at this point
             quantized = image.channel_data();
           } else {
             quantized = palette.quantize_image(sfc::Image(image.width(), image.height(), original_image_data),
-                                               settings.tile_w, settings.tile_h, quality_dither);
+                                               settings.tile_w, settings.tile_h, quality_dither,
+                                               settings.lab);
           }
-          auto report = sfc::compute_quality(original_image_data, quantized, image.width(), image.height(), settings.mode);
+          auto report = sfc::compute_quality(original_image_data, quantized, image.width(), image.height(),
+                                              settings.mode, settings.lab);
           fmt::print(stderr, "Quality ({} pixels):\n", report.total_pixels);
           fmt::print(stderr, "  MSE:          {:.4f}\n", report.mse);
           fmt::print(stderr, "  PSNR:         {:.2f} dB\n", report.psnr);
           fmt::print(stderr, "  Exact match:  {:.1f}%\n", report.exact_match_pct);
           fmt::print(stderr, "  Max error:    {:.1f}\n", report.max_error);
+          if (settings.lab)
+            fmt::print(stderr, "  Delta-E < 5:  {:.1f}%\n", report.pct_de_lt5);
         }
 
         // Composite preview
@@ -288,7 +304,8 @@ int superfamiconv(int argc, char* argv[]) {
             quantized_image = image; // already quantized
           } else {
             auto quantized = palette.quantize_image(sfc::Image(image.width(), image.height(), original_image_data),
-                                                    settings.tile_w, settings.tile_h, dither_opts);
+                                                    settings.tile_w, settings.tile_h, dither_opts,
+                                                    settings.lab);
             quantized_image = sfc::Image(image.width(), image.height(), quantized);
           }
           sfc::Image palette_image(palette);

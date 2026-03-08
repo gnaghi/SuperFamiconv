@@ -223,7 +223,8 @@ static channel_vec_t image_to_channels(const sfc::Image& img) {
 void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
                                    double fraction_of_pixels, uint32_t seed,
                                    const DitherOptions& dither,
-                                   const std::vector<rgba_vec_t>* initial_palettes) {
+                                   const std::vector<rgba_vec_t>* initial_palettes,
+                                   bool use_lab) {
   auto image_data = image_to_channels(full_image);
 
   auto result = sgd_optimize(
@@ -233,13 +234,13 @@ void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w
       _max_subpalettes, _max_colors_per_subpalette,
       _mode, fraction_of_pixels,
       _col0_is_shared, _col0,
-      seed, dither, initial_palettes
+      seed, dither, initial_palettes,
+      use_lab
   );
 
   for (auto& pal_colors : result.palettes) {
     auto& sp = add_subpalette();
     if (_col0_is_shared) {
-      // Ensure color 0 is at position 0
       auto reduced_col0 = reduce_color(_col0, _mode);
       auto p = std::find(pal_colors.begin(), pal_colors.end(), reduced_col0);
       if (p != pal_colors.end())
@@ -251,19 +252,22 @@ void Palette::add_images_optimized(const sfc::Image& full_image, unsigned tile_w
 
 // Quantize image using the current palettes, with optional dithering
 channel_vec_t Palette::quantize_image(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
-                                      const DitherOptions& dither) const {
+                                      const DitherOptions& dither,
+                                      bool use_lab) const {
   auto image_data = image_to_channels(full_image);
   return sgd_quantize(
       image_data,
       full_image.width(), full_image.height(),
       tile_w, tile_h,
-      colors(), _mode, dither
+      colors(), _mode, dither,
+      use_lab
   );
 }
 
 // add optimized subpalettes using tile-level k-means clustering
 void Palette::add_images_clustered(const sfc::Image& full_image, unsigned tile_w, unsigned tile_h,
-                                   uint32_t seed) {
+                                   uint32_t seed, bool use_lab,
+                                   bool use_greedy, bool hierarchical) {
   auto image_data = image_to_channels(full_image);
 
   auto result = cluster_optimize(
@@ -273,7 +277,8 @@ void Palette::add_images_clustered(const sfc::Image& full_image, unsigned tile_w
       _max_subpalettes, _max_colors_per_subpalette,
       _mode, 50,
       _col0_is_shared, _col0,
-      seed
+      seed,
+      use_lab, use_greedy, hierarchical
   );
 
   for (auto& pal_colors : result.palettes) {

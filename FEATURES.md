@@ -221,17 +221,128 @@ superfamiconv -i photo.png -O -Q --out-preview preview.png -p pal.bin -t tiles.b
 
 ---
 
+## 6. CIE Lab Color Distance (`--lab`)
+
+### What it does
+
+Switches all color distance calculations from weighted RGB (`2*dR²+4*dG²+dB²`) to CIE Lab Delta-E² (Euclidean distance in perceptually uniform Lab color space).
+
+### Why it's useful
+
+Weighted RGB distance doesn't match human perception. Two colors may be close in RGB but look very different to the human eye. CIE Lab is designed so that equal numeric distances correspond to equal perceptual differences. Using Lab as the optimization target produces palettes that look better to humans.
+
+### How it works
+
+1. **RGB → Lab conversion**: sRGB → linear → XYZ (D65 illuminant) → Lab
+2. **Static cache**: For SNES (5-bit, 32768 possible colors), a static array caches Lab values to avoid repeated conversions
+3. **Distance function**: `Delta-E² = dL² + da² + db²` replaces `2*dR² + 4*dG² + dB²`
+4. **Optimization stays in RGB**: SGD moves and k-means averages still operate on RGB values (Lab is not linear for mixing). Only distance measurements use Lab.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--lab` | off | Use CIE Lab Delta-E² for color distance |
+
+### Example
+
+```bash
+superfamiconv palette -i photo.png -K --lab --seed 42 -Q -o quantized.png
+```
+
+---
+
+## 7. Greedy Palette Selection (`--greedy`)
+
+### What it does
+
+Replaces the k-means-based palette building (which produces average colors) with a greedy algorithm that selects **real colors** from the image to maximize error reduction.
+
+### Why it's useful
+
+K-means computes cluster centroids (averages), producing synthetic colors that may not exist in the original image. The greedy approach picks actual pixel colors, ensuring each palette entry is a real color that best reduces the overall quantization error.
+
+### How it works
+
+1. Start with the most frequent color
+2. For each remaining palette slot, evaluate every unused color
+3. Pick the color whose addition maximally reduces the weighted error across all pixels in the cluster
+4. Update the minimum-distance table and repeat
+
+Complexity is O(n_colors² × n_palette) per cluster, which is fast for typical tile cluster sizes (~200-500 unique colors).
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--greedy` | off | Use greedy palette selection instead of k-means |
+
+### Example
+
+```bash
+superfamiconv palette -i photo.png -K --greedy --seed 42 -Q -o quantized.png
+```
+
+---
+
+## 8. Hierarchical Divisive Clustering (`--hierarchical`)
+
+### What it does
+
+Replaces flat k-means clustering with a top-down divisive approach that progressively splits the worst cluster until the target number of palettes is reached.
+
+### Why it's useful
+
+Flat k-means starts with random initialization and may get stuck in local minima. Hierarchical splitting is deterministic and focuses effort where it matters most: the cluster with the highest quantization error gets split first.
+
+### How it works
+
+1. **Start**: All tiles in one cluster, build one palette
+2. **Find worst**: Identify the cluster with the highest total error
+3. **Split**: Run 2-means on the Lab centroids of tiles in the worst cluster, initialized with the two most distant tile centroids
+4. **Rebuild**: Build palettes for each sub-cluster (using greedy if `--greedy` is active)
+5. **Repeat**: Steps 2-4 until K clusters are reached
+6. **Refine**: Up to 20 iterations of tile reassignment + palette rebuild until convergence
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--hierarchical` | off | Use hierarchical divisive clustering |
+
+### Example
+
+```bash
+# Full perceptual optimization (matches Python reference quality)
+superfamiconv palette -i photo.png -K --lab --greedy --hierarchical --seed 42 -Q -o quantized.png
+```
+
+---
+
+## Recommended Combinations
+
+| Use case | Command |
+|----------|---------|
+| Best perceptual quality | `-K --lab --greedy --hierarchical` |
+| Fast good quality | `-K --lab --greedy` |
+| Maximum optimization (slower) | `-K -O --lab --greedy --hierarchical` |
+| Simple photographic image | `-O` (SGD only) |
+| Original SuperFamiconv behavior | (no flags) |
+
+---
+
 ## Feature Interaction Matrix
 
-| | SGD (-O) | Cluster (-K) | Dither | Quality (-Q) | Preview |
-|---|---|---|---|---|---|
-| **Greedy** (default) | - | - | N/A | Yes | Yes |
-| **SGD** | Yes | - | off/fast/slow | Yes | Yes |
-| **Cluster** | - | Yes | N/A | Yes | Yes |
-| **Cluster+SGD** | Yes | Yes | off/fast/slow | Yes | Yes |
+| | SGD (-O) | Cluster (-K) | Dither | Quality (-Q) | Lab | Greedy | Hier |
+|---|---|---|---|---|---|---|---|
+| **Default** (greedy set-cover) | - | - | N/A | Yes | N/A | N/A | N/A |
+| **SGD** | Yes | - | off/fast/slow | Yes | Yes | N/A | N/A |
+| **Cluster** | - | Yes | N/A | Yes | Yes | Yes | Yes |
+| **Cluster+SGD** | Yes | Yes | off/fast/slow | Yes | Yes | Yes | Yes |
 
 Notes:
+- `--lab` works with `-O`, `-K`, or both. It changes the distance metric used during optimization and quantization.
+- `--greedy` and `--hierarchical` only apply to `-K` (clustering). They are ignored when only `-O` is used.
 - Dithering only applies when using SGD (with or without cluster initialization)
-- Quality assessment works with all modes
-- Preview works with all modes
-- Greedy mode fails on photographic images (too many colors per tile); use `-O` or `-K` instead
+- Quality assessment works with all modes; when `--lab` is active, reports Delta-E < 5 percentage
+- Default greedy set-cover mode fails on photographic images; use `-O` or `-K` instead

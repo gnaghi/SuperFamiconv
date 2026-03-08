@@ -46,6 +46,9 @@ In short hand mode, the following options are available:
 	--dither-weight       Dithering weight 0.01-1.0 (default: 0.5)
 	--dither-pattern      Dither pattern (default: diagonal4)
 	--color-zero          Set color #0
+	--lab                 Use CIE Lab Delta-E distance <switch>
+	--greedy              Greedy palette selection <switch>
+	--hierarchical        Hierarchical divisive clustering <switch>
 
 	-v --verbose          Verbose logging <switch>
 	-l --license          Show licenses <switch>
@@ -118,6 +121,9 @@ For more flexibility use the sub commands, which have the following options resp
 	  --dither-pattern          Dither pattern
 	  -0 --color-zero           Set color #0
 	  --out-preview             Output: composite preview image
+	  --lab                     Use CIE Lab Delta-E distance <switch>
+	  --greedy                  Greedy palette selection <switch>
+	  --hierarchical            Hierarchical divisive clustering <switch>
 
 	  -v --verbose              Verbose logging <switch>
 	  -h --help                 Show this help <switch>
