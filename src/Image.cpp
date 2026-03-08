@@ -314,6 +314,56 @@ void Image::blit_indexed(const channel_vec_t& data, const unsigned x, const unsi
     set_pixel_indexed(data[i], (i % width) + x, (i / width) + y);
 }
 
+Image Image::composite_preview(const Image& quantized_image, const Image& palette_image) {
+  unsigned width = std::max(quantized_image.width(), palette_image.width());
+  unsigned separator_height = 2;
+
+  // Scale palette swatch so each color cell is visible
+  unsigned cell_w = std::max(4u, width / palette_image.width());
+  if (cell_w > 32) cell_w = 32;
+  unsigned cell_h = cell_w;
+  unsigned scaled_pal_w = palette_image.width() * cell_w;
+  unsigned scaled_pal_h = palette_image.height() * cell_h;
+  if (scaled_pal_w > width) width = scaled_pal_w;
+  unsigned total_height = quantized_image.height() + separator_height + scaled_pal_h;
+
+  Image composite;
+  composite._width = width;
+  composite._height = total_height;
+  composite._data.resize(width * total_height * 4, 0);
+  composite._src_coord_x = composite._src_coord_y = 0;
+
+  // Blit quantized image at top
+  for (unsigned y = 0; y < quantized_image.height(); y++)
+    for (unsigned x = 0; x < quantized_image.width(); x++)
+      composite.set_pixel(quantized_image.rgba_color_at(x + y * quantized_image.width()), x, y);
+
+  // Draw separator line (dark gray)
+  rgba_t sep_color = 0xff404040;
+  for (unsigned sy = 0; sy < separator_height; sy++)
+    for (unsigned x = 0; x < width; x++)
+      composite.set_pixel(sep_color, x, quantized_image.height() + sy);
+
+  // Blit scaled palette swatch below separator
+  unsigned pal_start_y = quantized_image.height() + separator_height;
+  for (unsigned y = 0; y < palette_image.height(); y++) {
+    for (unsigned x = 0; x < palette_image.width(); x++) {
+      rgba_t pixel = palette_image.rgba_color_at(x + y * palette_image.width());
+      for (unsigned dy = 0; dy < cell_h; dy++)
+        for (unsigned dx = 0; dx < cell_w; dx++) {
+          unsigned px = x * cell_w + dx;
+          unsigned py = pal_start_y + y * cell_h + dy;
+          if (px < width && py < total_height)
+            composite.set_pixel(pixel, px, py);
+        }
+    }
+  }
+
+  auto rgba_v = composite.rgba_data();
+  composite._colors = rgba_set_t(rgba_v.begin(), rgba_v.end());
+  return composite;
+}
+
 void Image::set_default_palette(const unsigned indices) {
   _palette.resize(indices);
   channel_t add = 0x100 / _palette.size();

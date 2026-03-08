@@ -36,6 +36,7 @@ struct Image final {
   rgba_vec_t palette() const { return _palette; };
   index_vec_t indexed_data() const { return _indexed_data; }
   rgba_set_t colors() const { return _colors; }
+  const channel_vec_t& channel_data() const { return _data; }
 
   rgba_t rgba_color_at(unsigned index) const {
     return (_data[index * 4]) + (_data[(index * 4) + 1] << 8) + (_data[(index * 4) + 2] << 16) + (_data[(index * 4) + 3] << 24);
@@ -47,6 +48,9 @@ struct Image final {
   void save(const std::string& path) const;
   void save_indexed(const std::string& path);
   void save_scaled(const std::string& path, Mode mode);
+
+  // Create composite preview: quantized image stacked above palette swatch
+  static Image composite_preview(const Image& quantized_image, const Image& palette_image);
 
   const std::string description() const;
 

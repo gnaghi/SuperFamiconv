@@ -31,6 +31,8 @@ struct Settings {
   double dither_weight;
   std::string dither_pattern;
   std::string color_zero;
+  bool quality;
+  std::string out_preview;
 };
 }; // namespace SfcPalette
 
@@ -70,6 +72,8 @@ int sfc_palette(int argc, char* argv[]) {
     options.Add(settings.dither_weight,     '\0', "dither-weight",   "Dithering weight (0.01-1.0)",      double(0.5),         "Settings");
     options.Add(settings.dither_pattern,    '\0', "dither-pattern",  "Dither pattern (diagonal4/horizontal4/vertical4/diagonal2/horizontal2/vertical2)", std::string("diagonal4"), "Settings");
     options.Add(settings.color_zero,         '0', "color-zero",     "Set color #0",                     std::string(),       "Settings");
+    options.AddSwitch(settings.quality,     'Q', "quality",        "Print quality assessment",         false,               "Settings");
+    options.Add(settings.out_preview,       '\0', "out-preview",    "Output: composite preview image", std::string(),       "Settings");
 
     options.AddSwitch(verbose,               'v', "verbose",        "Verbose logging", false, "_");
     options.AddSwitch(help,                  'h', "help",           "Show this help",  false, "_");
@@ -124,6 +128,17 @@ int sfc_palette(int argc, char* argv[]) {
 
     sfc::Palette palette;
 
+    // Parse dither options (used by optimize/cluster and quality/preview)
+    sfc::DitherOptions dither_opts;
+    if (settings.dither == "fast") dither_opts.mode = sfc::DitherMode::fast;
+    else if (settings.dither == "slow") dither_opts.mode = sfc::DitherMode::slow;
+    dither_opts.weight = settings.dither_weight;
+    if (settings.dither_pattern == "horizontal4") dither_opts.pattern = sfc::DitherPattern::horizontal4;
+    else if (settings.dither_pattern == "vertical4") dither_opts.pattern = sfc::DitherPattern::vertical4;
+    else if (settings.dither_pattern == "diagonal2") dither_opts.pattern = sfc::DitherPattern::diagonal2;
+    else if (settings.dither_pattern == "horizontal2") dither_opts.pattern = sfc::DitherPattern::horizontal2;
+    else if (settings.dither_pattern == "vertical2") dither_opts.pattern = sfc::DitherPattern::vertical2;
+
     if (settings.no_remap) {
       if (image.palette_size() == 0)
         throw std::runtime_error("no-remap requires indexed color image");
@@ -152,17 +167,6 @@ int sfc_palette(int argc, char* argv[]) {
       }
 
       if (settings.optimize || settings.cluster) {
-        // Parse dither options
-        sfc::DitherOptions dither_opts;
-        if (settings.dither == "fast") dither_opts.mode = sfc::DitherMode::fast;
-        else if (settings.dither == "slow") dither_opts.mode = sfc::DitherMode::slow;
-        dither_opts.weight = settings.dither_weight;
-        if (settings.dither_pattern == "horizontal4") dither_opts.pattern = sfc::DitherPattern::horizontal4;
-        else if (settings.dither_pattern == "vertical4") dither_opts.pattern = sfc::DitherPattern::vertical4;
-        else if (settings.dither_pattern == "diagonal2") dither_opts.pattern = sfc::DitherPattern::diagonal2;
-        else if (settings.dither_pattern == "horizontal2") dither_opts.pattern = sfc::DitherPattern::horizontal2;
-        else if (settings.dither_pattern == "vertical2") dither_opts.pattern = sfc::DitherPattern::vertical2;
-
         if (settings.cluster && settings.optimize) {
           // Cluster + SGD: cluster initialization, then SGD refinement
           if (verbose)
@@ -207,6 +211,28 @@ int sfc_palette(int argc, char* argv[]) {
 
     if (!settings.no_remap) {
       palette.sort();
+    }
+
+    // Quality assessment
+    if (settings.quality && !settings.no_remap) {
+      auto quantized = palette.quantize_image(image, settings.tile_w, settings.tile_h, dither_opts);
+      auto report = sfc::compute_quality(image.channel_data(), quantized, image.width(), image.height(), settings.mode);
+      fmt::print(stderr, "Quality ({} pixels):\n", report.total_pixels);
+      fmt::print(stderr, "  MSE:          {:.4f}\n", report.mse);
+      fmt::print(stderr, "  PSNR:         {:.2f} dB\n", report.psnr);
+      fmt::print(stderr, "  Exact match:  {:.1f}%\n", report.exact_match_pct);
+      fmt::print(stderr, "  Max error:    {:.1f}\n", report.max_error);
+    }
+
+    // Composite preview
+    if (!settings.out_preview.empty() && !settings.no_remap) {
+      auto quantized = palette.quantize_image(image, settings.tile_w, settings.tile_h, dither_opts);
+      sfc::Image quantized_image(image.width(), image.height(), quantized);
+      sfc::Image palette_image(palette);
+      sfc::Image preview = sfc::Image::composite_preview(quantized_image, palette_image);
+      preview.save(settings.out_preview);
+      if (verbose)
+        fmt::print("Saved composite preview to \"{}\"\n", settings.out_preview);
     }
 
     // Write data

@@ -1237,4 +1237,54 @@ OptimizedResult cluster_optimize(
   return result;
 }
 
+// ── Quality assessment ─────────────────────────────────────────────────────────
+
+QualityReport compute_quality(
+    const channel_vec_t& image_data,
+    const channel_vec_t& quantized_data,
+    unsigned width, unsigned height,
+    Mode mode)
+{
+  double sum_error = 0;
+  double max_error = 0;
+  unsigned exact = 0;
+  unsigned total = 0;
+
+  for (unsigned i = 0; i < width * height; i++) {
+    rgba_t orig_pixel = image_data[i * 4]
+                      | (image_data[i * 4 + 1] << 8)
+                      | (image_data[i * 4 + 2] << 16)
+                      | (image_data[i * 4 + 3] << 24);
+    rgba_t orig_reduced = reduce_color(orig_pixel, mode);
+    if (orig_reduced == transparent_color) continue;
+
+    rgba_t quant_pixel = quantized_data[i * 4]
+                       | (quantized_data[i * 4 + 1] << 8)
+                       | (quantized_data[i * 4 + 2] << 16)
+                       | (quantized_data[i * 4 + 3] << 24);
+    rgba_t quant_reduced = reduce_color(quant_pixel, mode);
+
+    double or_ = orig_reduced & 0xff, og = (orig_reduced >> 8) & 0xff, ob = (orig_reduced >> 16) & 0xff;
+    double qr = quant_reduced & 0xff, qg = (quant_reduced >> 8) & 0xff, qb = (quant_reduced >> 16) & 0xff;
+
+    double dr = or_ - qr, dg = og - qg, db = ob - qb;
+    double dist = 2 * dr * dr + 4 * dg * dg + db * db;
+
+    sum_error += dist;
+    if (dist > max_error) max_error = dist;
+    if (dist == 0) exact++;
+    total++;
+  }
+
+  QualityReport report;
+  report.total_pixels = total;
+  report.mse = total > 0 ? sum_error / total : 0;
+  unsigned max_val = max_channel_value_for_mode(mode);
+  double max_possible = 7.0 * max_val * max_val; // 2*M^2 + 4*M^2 + M^2
+  report.psnr = report.mse > 0 ? 10.0 * log10(max_possible / report.mse) : 99.99;
+  report.exact_match_pct = total > 0 ? 100.0 * exact / total : 100.0;
+  report.max_error = max_error;
+  return report;
+}
+
 } /* namespace sfc */

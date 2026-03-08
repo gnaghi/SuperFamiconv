@@ -90,4 +90,23 @@ channel_vec_t sgd_quantize(
 // Get the maximum channel value for a given mode (e.g., 31 for 5-bit SNES)
 unsigned max_channel_value_for_mode(Mode mode);
 
+// Quality assessment report
+struct QualityReport {
+  double mse;              // Mean squared error (weighted: 2*dR^2+4*dG^2+dB^2)
+  double psnr;             // Peak signal-to-noise ratio (dB)
+  double exact_match_pct;  // Percentage of pixels with exact color match
+  double max_error;        // Worst single-pixel weighted error
+  unsigned total_pixels;   // Total non-transparent pixels evaluated
+};
+
+// Compute quality metrics comparing original vs quantized image.
+// Both inputs are raw RGBA channel vectors (8-bit per channel).
+// Comparison is done in reduced color space for the given mode.
+QualityReport compute_quality(
+    const channel_vec_t& image_data,
+    const channel_vec_t& quantized_data,
+    unsigned width, unsigned height,
+    Mode mode
+);
+
 } /* namespace sfc */
