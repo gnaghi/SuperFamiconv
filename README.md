@@ -26,6 +26,7 @@ In short hand mode, the following options are available:
 	--out-palette-act     Output: photoshop palette
 	--out-tiles-image     Output: tiles image
 	--out-scaled-image    Output: image scaled to destination colorspace
+	--out-preview         Output: composite preview image (quantized + palette)
 
 	-M --mode             Mode <default: snes>
 	-B --bpp              Bits per pixel
@@ -36,6 +37,14 @@ In short hand mode, the following options are available:
 	-F --no-flip          Don't discard using tile flipping <switch>
 	-T --tile-base-offset Tile base offset for map data
 	-S --sprite-mode      Apply sprite output settings <switch>
+	-O --optimize         Use SGD palette optimization <switch>
+	-K --cluster          Use tile-clustering optimization <switch>
+	-Q --quality          Print quality assessment to stderr <switch>
+	--seed                Random seed for optimizer
+	--fraction-of-pixels  Optimizer training intensity (default: 0.1)
+	--dither              Dithering mode: off, fast, slow (default: off)
+	--dither-weight       Dithering weight 0.01-1.0 (default: 0.5)
+	--dither-pattern      Dither pattern (default: diagonal4)
 	--color-zero          Set color #0
 
 	-v --verbose          Verbose logging <switch>
@@ -99,7 +108,16 @@ For more flexibility use the sub commands, which have the following options resp
 	  -H --tile-height          Tile height
 	  -R --no-remap             Don't remap colors <switch>
 	  -S --sprite-mode          Apply sprite output settings <switch>
+	  -O --optimize             Use SGD palette optimization <switch>
+	  -K --cluster              Use tile-clustering optimization <switch>
+	  -Q --quality              Print quality assessment to stderr <switch>
+	  --seed                    Random seed for optimizer
+	  --fraction-of-pixels      Optimizer training intensity
+	  --dither                  Dithering mode (off/fast/slow)
+	  --dither-weight           Dithering weight (0.01-1.0)
+	  --dither-pattern          Dither pattern
 	  -0 --color-zero           Set color #0
+	  --out-preview             Output: composite preview image
 
 	  -v --verbose              Verbose logging <switch>
 	  -h --help                 Show this help <switch>
